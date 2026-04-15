@@ -16,6 +16,7 @@ from flask import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from natsort import natsorted
 from sdk.cloudsaver import CloudSaver
 from sdk.pansou import PanSou
 from datetime import timedelta
@@ -31,7 +32,13 @@ import re
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
-from quark_auto_save import Quark, Config, MagicRename
+from quark_auto_save import (
+    Quark,
+    Config,
+    MagicRename,
+    _apply_seq_placeholders,
+    _parse_order_start,
+)
 
 print(
     r"""
@@ -366,7 +373,29 @@ def get_share_detail():
     def preview_regex(data):
         task = request.json.get("task", {})
         magic_regex = request.json.get("magic_regex", {})
-        mr = MagicRename(magic_regex)
+        # 任务级配置
+        # 过滤（兼容旧 filter_words）
+        filt = task.get("filter", {}) if isinstance(task, dict) else {}
+        inc_raw = filt.get("include", "") if isinstance(filt, dict) else ""
+        exc_raw = filt.get("exclude", "") if isinstance(filt, dict) else ""
+        legacy_exclude = (task.get("filter_words", "") or "").strip()
+
+        def _split_words(v):
+            if not v:
+                return []
+            parts = re.split(r"[,\s，]+", str(v))
+            return [p.strip().lower() for p in parts if p.strip()]
+
+        include_words = _split_words(inc_raw)
+        exclude_words = _split_words(exc_raw) + _split_words(legacy_exclude)
+        raw_pattern = task.get("pattern", "") or ""
+        raw_replace = task.get("replace", "") or ""
+        is_order_mode = (raw_replace == "") and ("{}" in str(raw_pattern))
+        is_episode_mode = (raw_replace == "") and ("[]" in str(raw_pattern))
+
+        episode_patterns = (config_data.get("episode_regex", "") or "").strip()
+        episode_list = [p.strip() for p in str(episode_patterns).split("|") if p.strip()]
+        mr = MagicRename(magic_regex, magic_variable=({"{E}": episode_list} if episode_list else {}))
         mr.set_taskname(task.get("taskname", ""))
         account = Quark(config_data["cookie"][0])
         get_fids = account.get_fids([task.get("savepath", "")])
@@ -380,6 +409,17 @@ def get_share_detail():
         pattern, replace = mr.magic_regex_conv(
             task.get("pattern", ""), task.get("replace", "")
         )
+        # 过滤与模式约束：预览与转存保持一致
+        if include_words or exclude_words:
+            data["list"] = [
+                f
+                for f in data["list"]
+                if (not exclude_words or not any(w in (f.get("file_name", "").lower()) for w in exclude_words))
+                and (not include_words or any(w in (f.get("file_name", "").lower()) for w in include_words))
+            ]
+        if is_order_mode or is_episode_mode:
+            data["list"] = [f for f in data["list"] if not f.get("dir")]
+
         for share_file in data["list"]:
             search_pattern = (
                 task["update_subdir"]
@@ -405,7 +445,31 @@ def get_share_detail():
         # 文件列表排序
         if re.search(r"\{I+\}", replace):
             mr.set_dir_file_list(dir_file_list, replace)
-            mr.sort_file_list(data["list"])
+            if is_order_mode:
+                max_existing = max(mr.dir_filename_dict.keys(), default=0)
+                seq_start = _parse_order_start(task, max_existing + 1)
+                # 与后端转存保持一致：日期/期号/上中下/修改时间综合排序
+                data["list"] = sorted(
+                    data["list"],
+                    key=lambda f: mr.order_sort_key(
+                        f.get("file_name", ""), f.get("updated_at")
+                    ),
+                    reverse=False,
+                )
+                for i, f in enumerate(data["list"]):
+                    if f.get("file_name_re"):
+                        f["file_name_re"] = _apply_seq_placeholders(
+                            f.get("file_name_re", ""), seq_start + i
+                        )
+            else:
+                mr.sort_file_list(data["list"])
+        elif is_episode_mode and re.search(r"\{E+\}", replace):
+            data["list"] = [
+                f for f in data["list"] if mr.episode_number(f.get("file_name", "")) is not None
+            ]
+            data["list"].sort(
+                key=lambda f: mr.episode_sort_key(f.get("file_name", ""), f.get("updated_at"))
+            )
 
     if request.json.get("task"):
         preview_regex(data)

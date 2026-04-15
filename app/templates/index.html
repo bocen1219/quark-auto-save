@@ -185,6 +185,18 @@
               </div>
             </div>
 
+            <div class="row title" title="用于从原始文件名中提取剧集/期数编号（[] 模式将使用该规则）。多个表达式用 | 分隔，每个表达式需包含一个 (\\d+) 捕获组。">
+              <div class="col-10">
+                <h2 style="display: inline-block;"><i class="bi bi-list-ol"></i> 剧集识别</h2>
+              </div>
+            </div>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">集编号识别规则</label>
+              <div class="col-sm-10">
+                <input type="text" v-model="formData.episode_regex" class="form-control" placeholder="例如：第(\\d+)集|第(\\d+)期|[Ee][Pp]?(\\d+)|\\[(\\d+)\\]">
+              </div>
+            </div>
+
 
             <div class="row title" title="API接口，用以第三方添加任务等操作，见Wiki">
               <div class="col-10">
@@ -420,6 +432,28 @@
                       <datalist id="magicRegex">
                         <option v-for="(value, key) in formData.magic_regex" :key="key" :value="`${key}`" v-html="`${value.pattern.replace('<', '<\u200B')} → ${value.replace}`"></option>
                       </datalist>
+                    </div>
+                  </div>
+                  <div class="form-group row" title="仅顺序命名（{}）生效。可填 01 / E01 / S1E01，系统会取最后数字作为起始编号。留空则自动接续目录已有最大序号。">
+                    <label class="col-sm-2 col-form-label">顺序起始</label>
+                    <div class="col-sm-10">
+                      <input type="text" class="form-control" v-model="task.order_start" placeholder="可选，例如：E01">
+                    </div>
+                  </div>
+                  <div class="form-group row" title="可选：exclude 命中即跳过；include 非命中即跳过（OR 关系）。逗号/空格分隔">
+                    <label class="col-sm-2 col-form-label">过滤规则</label>
+                    <div class="col-sm-10">
+                      <div class="input-group">
+                        <div class="input-group-prepend">
+                          <span class="input-group-text">include</span>
+                        </div>
+                        <input type="text" class="form-control" v-model="task.filter.include" placeholder="可选，例如：正片,hdr,高码">
+                        <div class="input-group-prepend">
+                          <span class="input-group-text">exclude</span>
+                        </div>
+                        <input type="text" class="form-control" v-model="task.filter.exclude" placeholder="可选，例如：纯享,预告,抢先,txt">
+                      </div>
+                      <small class="text-muted">不填 include 表示不过滤保留；不填 exclude 表示不排除。</small>
                     </div>
                   </div>
                   <div class="form-group row" title="可选，选择后将转存从该文件到最新文件（含）">
@@ -695,6 +729,7 @@
           savepath: "/",
           pattern: "",
           replace: "",
+          order_start: "",
           enddate: "",
           addition: {},
           ignore_extension: false,
@@ -803,6 +838,11 @@
                   task.runweek = [1, 2, 3, 4, 5, 6, 7];
                 }
                 if (!task.hasOwnProperty('endfid')) task.endfid = "";
+                if (!task.hasOwnProperty('order_start')) task.order_start = "";
+                if (!task.hasOwnProperty('filter')) task.filter = { include: "", exclude: "" };
+                if (!task.filter) task.filter = { include: "", exclude: "" };
+                if (!task.filter.hasOwnProperty('include')) task.filter.include = "";
+                if (!task.filter.hasOwnProperty('exclude')) task.filter.exclude = "";
                 if (!task.hasOwnProperty('pansou_src')) task.pansou_src = "";
                 if (!task.hasOwnProperty('pansou_plugins')) task.pansou_plugins = "";
                 if (!task.hasOwnProperty('pansou_channels')) task.pansou_channels = "";
@@ -836,6 +876,10 @@
                 config_data.source.net = {
                   enable: ""
                 };
+              }
+              // episode_regex：仅在用户显式填写时才覆盖后端默认识别逻辑
+              if (!config_data.hasOwnProperty('episode_regex')) {
+                config_data.episode_regex = "";
               }
               this.formData = config_data;
               setTimeout(() => {
@@ -1210,7 +1254,10 @@
           }).then(response => {
             if (response.data.success) {
               this.fileSelect.fileList = response.data.data.list;
-              this.sortFileList(this.fileSelect.sortBy, this.fileSelect.sortOrder);
+              // 正则处理预览的顺序由后端生成（含剧集/顺序命名规则），前端不再二次覆盖排序
+              if (!this.fileSelect.previewRegex) {
+                this.sortFileList(this.fileSelect.sortBy, this.fileSelect.sortOrder);
+              }
               this.fileSelect.paths = response.data.data.paths;
               this.fileSelect.stoken = response.data.data.stoken;
             } else {

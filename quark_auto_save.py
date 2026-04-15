@@ -218,6 +218,21 @@ class MagicRename:
 
     def magic_regex_conv(self, pattern, replace):
         """魔法正则匹配"""
+        auto_placeholder_mode = False
+        # 兼容占位符模式（按你的 B 方案）：
+        # 当用户在“匹配表达式”里写 {} 或 []，且替换表达式为空时，
+        # 认为用户在输入“命名模板”，自动把它挪到 replace，并让 pattern 匹配全部文件。
+        if (
+            isinstance(pattern, str)
+            and pattern
+            and (("{}" in pattern) or ("[]" in pattern))
+            and (replace == "" or replace is None)
+        ):
+            auto_placeholder_mode = True
+            replace = pattern
+            # 使用 ^.*$ 避免 re.sub(".*", ...) 产生双重替换（整串 + 末尾空串）
+            pattern = r"^.*$"
+
         keyword = pattern
         if keyword in self.magic_regex:
             pattern = self.magic_regex[keyword]["pattern"]
@@ -225,18 +240,47 @@ class MagicRename:
                 replace = self.magic_regex[keyword]["replace"]
         # 兼容占位符模式：
         # - {}：顺序命名，占位符会转换为 {II}（默认两位补零），并由后续 {I+} 逻辑自动编号
-        # - []：剧集命名，占位符会转换为 {E}（从原文件名提取集编号）
+        # - []：剧集命名，占位符会转换为 {EE}（默认两位补零，从原文件名提取集编号）
         if isinstance(replace, str) and replace:
             if "{}" in replace and not re.search(r"\{I+\}", replace):
                 replace = replace.replace("{}", "{II}")
-            if "[]" in replace and "{E}" not in replace:
-                replace = replace.replace("[]", "{E}")
+            if "[]" in replace and not re.search(r"\{E+\}", replace):
+                replace = replace.replace("[]", "{EE}")
+            # B 模式下仅输入 pattern 模板时，自动补上后缀占位符
+            if auto_placeholder_mode and "{EXT}" not in replace:
+                # 若模板已经包含显式扩展名（如 .mkv/.mp4）则不重复追加
+                if not re.search(r"\.[A-Za-z0-9]{2,5}$", replace):
+                    replace = f"{replace}.{{EXT}}"
         return pattern, replace
 
     def sub(self, pattern, replace, file_name):
         """魔法正则、变量替换"""
         if not replace:
             return file_name
+        # 先处理剧集编号占位符 {E+}
+        if match_e := re.search(r"\{E+\}", replace):
+            ep = None
+            for p in self.magic_variable.get("{E}", []) or []:
+                try:
+                    m = re.search(p, file_name)
+                except re.error:
+                    continue
+                if not m:
+                    continue
+                v = m.group(1) if m.groups() else m.group()
+                digits = "".join(ch for ch in str(v) if ch.isdigit())
+                if digits:
+                    ep = int(digits)
+                    break
+            if ep is not None:
+                def _repl_e(m: re.Match):
+                    width = m.group().count("E")
+                    return str(ep).zfill(width)
+                replace = re.sub(r"\{E+\}", _repl_e, replace)
+            else:
+                # 无法提取时清理占位符，避免生成空/重复名
+                replace = re.sub(r"\{E+\}", "", replace)
+
         # 预处理替换变量
         for key, p_list in self.magic_variable.items():
             if key in replace:
@@ -246,7 +290,7 @@ class MagicRename:
                         match = re.search(p, file_name)
                         if match:
                             # 匹配成功，替换为匹配到的值
-                            value = match.group()
+                            value = match.group(1) if (key == "{E}" and match.groups()) else match.group()
                             # 日期格式处理：补全、格式化
                             if key == "{DATE}":
                                 value = "".join(
@@ -273,6 +317,195 @@ class MagicRename:
             file_name = replace
         return file_name
 
+    def order_sort_key(self, file_name: str, updated_at: int | str | None = None):
+        """
+        顺序命名智能排序键：
+        主序号(01/02/罗马数字) → 上中下 → 日期 → 修改时间 → 文件名兜底
+        """
+        name = file_name or ""
+
+        def _extract_first_int(patterns: list[str]) -> int | None:
+            for p in patterns or []:
+                try:
+                    m = re.search(p, name)
+                except re.error:
+                    continue
+                if not m:
+                    continue
+                # 优先捕获组，否则整段
+                v = m.group(1) if m.groups() else m.group()
+                digits = "".join(ch for ch in str(v) if ch.isdigit())
+                if digits:
+                    return int(digits)
+            return None
+
+        def _roman_to_int(s: str) -> int | None:
+            if not s:
+                return None
+            s = s.strip()
+            # Unicode 罗马数字（ⅠⅡⅢ…）
+            uni_map = {
+                "Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5,
+                "Ⅵ": 6, "Ⅶ": 7, "Ⅷ": 8, "Ⅸ": 9, "Ⅹ": 10,
+                "Ⅺ": 11, "Ⅻ": 12, "Ⅼ": 50,
+            }
+            if s in uni_map:
+                return uni_map[s]
+            # ASCII 罗马数字（I II III IV V …）
+            s2 = re.sub(r"[^IVXLCDM]", "", s.upper())
+            if not s2:
+                return None
+            values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+            total = 0
+            prev = 0
+            for ch in reversed(s2):
+                v = values.get(ch, 0)
+                if v < prev:
+                    total -= v
+                else:
+                    total += v
+                    prev = v
+            return total if total > 0 else None
+
+        def _strip_leading_date_prefix(s: str) -> str:
+            # 去掉常见日期前缀，避免把年份/月份当作序号
+            # 例如：2026.04.08-08案：… / 2026-04-15 09案：…
+            s = re.sub(r"^\s*(18|19|20)\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}[日]?\s*", "", s)
+            # 去掉紧跟的分隔符
+            s = re.sub(r"^[\s\-_—:：]+", "", s)
+            return s
+
+        def _extract_primary_no() -> int | None:
+            s = _strip_leading_date_prefix(name)
+            # 优先：分隔符后/括号前的两三位序号（01/02/003）
+            m = re.search(r"(?<!\d)(\d{1,3})(?!\d)", s)
+            if m:
+                return int(m.group(1))
+            # 其次：罗马数字（Ⅱ / II / EPⅡ 等）
+            m = re.search(r"(?<!\w)([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]|[IVXLCDM]{1,6})(?!\w)", s, re.I)
+            if m:
+                return _roman_to_int(m.group(1))
+            return None
+
+        def _extract_sub_no() -> int | None:
+            # 细分序号：优先匹配末尾括号中的编号，如 (I)/(Ⅱ)/(3)
+            m = re.search(r"[（(]\s*([0-9]{1,3}|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[IVXLCDM]{1,6})\s*[）)]", name, re.I)
+            if not m:
+                return None
+            token = m.group(1)
+            if token.isdigit():
+                return int(token)
+            return _roman_to_int(token)
+
+        # 期/集（复用 {E} 规则，作为兜底）
+        ep_val = _extract_first_int(self.magic_variable.get("{E}", []))
+
+        # 上中下
+        part_val = None
+        for p in self.magic_variable.get("{PART}", []) or []:
+            try:
+                m = re.search(p, name)
+            except re.error:
+                continue
+            if not m:
+                continue
+            v = m.group(1) if m.groups() else m.group()
+            if v in ("上",):
+                part_val = 1
+            elif v in ("中",):
+                part_val = 2
+            elif v in ("下",):
+                part_val = 3
+            else:
+                # 一二三四…兜底
+                mapping = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                part_val = mapping.get(str(v), None)
+            break
+
+        try:
+            tm = int(updated_at or 0)
+        except Exception:
+            tm = 0
+        try:
+            day_key = int(datetime.fromtimestamp(tm).strftime("%Y%m%d")) if tm else 0
+        except Exception:
+            day_key = 0
+
+        primary_no = _extract_primary_no()
+        sub_no = _extract_sub_no()
+        INF = 10**12
+        # 先导片优先：固定排最前，确保编号从 01 开始
+        special_rank = 0 if re.search(r"先导片|先导", name) else 1
+        # 这个 key 给 reverse=False 使用：
+        # - 主排序：文件自身日期（天）最新在上
+        # - 同一天/同批次：主序号从小到大（01 -> 02 -> 03；II -> III）
+        # - 再按上中下：上->中->下
+        # - 再按精确时间（秒）与文件名兜底稳定
+        return (
+            special_rank,
+            -day_key,
+            primary_no if primary_no is not None else INF,
+            sub_no if sub_no is not None else INF,
+            part_val if part_val is not None else INF,
+            -tm,
+            self._custom_sort_key(name.lower()),
+            ep_val if ep_val is not None else INF,
+        )
+
+    def episode_number(self, file_name: str) -> int | None:
+        name = file_name or ""
+        for p in self.magic_variable.get("{E}", []) or []:
+            try:
+                m = re.search(p, name)
+            except re.error:
+                continue
+            if not m:
+                continue
+            v = m.group(1) if m.groups() else m.group()
+            digits = "".join(ch for ch in str(v) if ch.isdigit())
+            if digits:
+                return int(digits)
+        return None
+
+    def episode_sort_key(self, file_name: str, updated_at: int | str | None = None):
+        name = file_name or ""
+        ep = self.episode_number(name)
+        # 上中下
+        part_val = None
+        for p in self.magic_variable.get("{PART}", []) or []:
+            try:
+                m = re.search(p, name)
+            except re.error:
+                continue
+            if not m:
+                continue
+            v = m.group(1) if m.groups() else m.group()
+            if v == "上":
+                part_val = 1
+            elif v == "中":
+                part_val = 2
+            elif v == "下":
+                part_val = 3
+            else:
+                mapping = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                part_val = mapping.get(str(v), None)
+            break
+        try:
+            tm = int(updated_at or 0)
+        except Exception:
+            tm = 0
+        INF = 10**12
+        # 这个 key 给 reverse=False 使用：
+        # - 主排序：集号从小到大（E01, E02 ...）
+        # - 同集：上->中->下
+        # - 再用 updated_at 新到旧、文件名兜底稳定
+        return (
+            ep if ep is not None else INF,
+            part_val if part_val is not None else INF,
+            -tm,
+            self._custom_sort_key(name.lower()),
+        )
+
     def _custom_sort_key(self, name):
         """自定义排序键"""
         for i, keyword in enumerate(self.priority_list):
@@ -288,9 +521,7 @@ class MagicRename:
             for f in file_list
             if f.get("file_name_re") and not f["dir"]
         ]
-        # print(f"filename_list_before: {filename_list}")
         dir_filename_dict = dir_filename_dict or self.dir_filename_dict
-        # print(f"dir_filename_list: {dir_filename_list}")
         # 合并目录文件列表
         filename_list = list(set(filename_list) | set(dir_filename_dict.values()))
         filename_list = natsorted(filename_list, key=self._custom_sort_key)
@@ -332,7 +563,6 @@ class MagicRename:
                     pattern = pattern.replace(key, "🔣")
             pattern = re.sub(r"\\[0-9]+", "🔣", pattern)  # \1 \2 \3
             pattern = f"({re.escape(pattern).replace('🔣', '.*?').replace('🔢', f')({pattern_i})(')})"
-            # print(f"pattern: {pattern}")
             # 获取起始编号
             if match := re.match(pattern, filename_list[-1]):
                 self.magic_variable["{I}"] = int(match.group(2))
@@ -342,11 +572,9 @@ class MagicRename:
                     self.dir_filename_dict[int(match.group(2))] = (
                         match.group(1) + magic_i + match.group(3)
                     )
-            # print(f"filename_list: {self.filename_list}")
 
     def is_exists(self, filename, filename_list, ignore_ext=False):
         """判断文件是否存在，处理忽略扩展名"""
-        # print(f"filename: {filename} filename_list: {filename_list}")
         if ignore_ext:
             filename = os.path.splitext(filename)[0]
             filename_list = [os.path.splitext(f)[0] for f in filename_list]
@@ -361,6 +589,125 @@ class MagicRename:
             return None
         else:
             return filename if filename in filename_list else None
+
+
+def _apply_seq_placeholders(template: str, seq: int) -> str:
+    if not template:
+        return template
+
+    def _repl(m: re.Match):
+        width = m.group().count("I")
+        return str(seq).zfill(width)
+
+    return re.sub(r"\{I+\}", _repl, template)
+
+
+def _updated_at_num(file_item: dict) -> int:
+    try:
+        return int(file_item.get("updated_at") or 0)
+    except Exception:
+        return 0
+
+
+def _parse_order_start(task: dict, default_start: int) -> int:
+    """
+    解析顺序命名起始编号，支持输入如：
+    - 01
+    - E01
+    - S1E01
+    取最后一段连续数字作为起始值，非法/为空则回退 default_start。
+    """
+    if not isinstance(task, dict):
+        return default_start
+    raw = str(task.get("order_start", "") or "").strip()
+    if not raw:
+        return default_start
+    nums = re.findall(r"\d+", raw)
+    if not nums:
+        return default_start
+    try:
+        v = int(nums[-1])
+    except Exception:
+        return default_start
+    return v if v > 0 else default_start
+
+
+def _parse_filter_words(filter_words: str) -> list[str]:
+    if not filter_words:
+        return []
+    parts = re.split(r"[,\s，]+", str(filter_words))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _parse_filter_config(task: dict) -> tuple[list[str], list[str]]:
+    """
+    兼容两种输入：
+    - 新版：task.filter = {"include":[...], "exclude":[...]}（逗号分隔字符串也支持）
+    - 旧版：task.filter_words（视为 exclude）
+    """
+    include: list[str] = []
+    exclude: list[str] = []
+
+    filt = task.get("filter") if isinstance(task, dict) else None
+    if isinstance(filt, dict):
+        inc = filt.get("include", [])
+        exc = filt.get("exclude", [])
+        if isinstance(inc, str):
+            include = _parse_filter_words(inc)
+        elif isinstance(inc, list):
+            include = [str(x).strip() for x in inc if str(x).strip()]
+        if isinstance(exc, str):
+            exclude = _parse_filter_words(exc)
+        elif isinstance(exc, list):
+            exclude = [str(x).strip() for x in exc if str(x).strip()]
+
+    # 旧字段兼容：filter_words 作为 exclude 追加
+    legacy = task.get("filter_words", "") if isinstance(task, dict) else ""
+    if legacy:
+        exclude.extend(_parse_filter_words(legacy))
+
+    # 去重保持顺序
+    def _uniq(xs: list[str]) -> list[str]:
+        seen = set()
+        out = []
+        for x in xs:
+            k = x.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(x)
+        return out
+
+    return _uniq(include), _uniq(exclude)
+
+
+def _should_skip_by_filter(filename: str, include: list[str], exclude: list[str]) -> bool:
+    s = (filename or "").lower()
+    if exclude and any(w.lower() in s for w in exclude):
+        return True
+    if include:
+        return not any(w.lower() in s for w in include)
+    return False
+
+
+def _is_filtered(filename: str, filter_words: str) -> bool:
+    words = _parse_filter_words(filter_words)
+    if not words:
+        return False
+    s = (filename or "").lower()
+    return any(w.lower() in s for w in words)
+
+
+def _build_episode_patterns(config_data: dict) -> list[str]:
+    """
+    从配置读取集编号识别规则。用户可用 | 分隔多个表达式；每个表达式需要包含一个 (\\d+) 捕获组。
+    """
+    raw = (config_data or {}).get("episode_regex", "") or ""
+    raw = str(raw).strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    return parts
 
 
 class Quark:
@@ -890,8 +1237,18 @@ class Quark:
         )
 
         # 文件命名类
-        mr = MagicRename(CONFIG_DATA.get("magic_regex", {}))
+        episode_patterns = _build_episode_patterns(CONFIG_DATA)
+        mr = MagicRename(
+            CONFIG_DATA.get("magic_regex", {}),
+            magic_variable=({"{E}": episode_patterns} if episode_patterns else {}),
+        )
         mr.set_taskname(task["taskname"])
+
+        raw_pattern = task.get("pattern", "") or ""
+        raw_replace = task.get("replace", "") or ""
+        is_order_mode = (raw_replace == "") and ("{}" in str(raw_pattern))
+        is_episode_mode = (raw_replace == "") and ("[]" in str(raw_pattern))
+        filter_include, filter_exclude = _parse_filter_config(task)
 
         # 魔法正则转换
         pattern, replace = mr.magic_regex_conv(
@@ -966,6 +1323,14 @@ class Quark:
         for idx, share_file in enumerate(share_file_list):
             fid = str(share_file.get("fid", ""))
             if selected_index_set is not None and idx not in selected_index_set:
+                continue
+            # 过滤：include/exclude
+            if _should_skip_by_filter(
+                share_file.get("file_name", ""), filter_include, filter_exclude
+            ):
+                continue
+            # 顺序/剧集命名模式：不处理目录，也不递归目录内容
+            if (is_order_mode or is_episode_mode) and share_file.get("dir"):
                 continue
 
             search_pattern = (
@@ -1050,7 +1415,31 @@ class Quark:
 
         if re.search(r"\{I+\}", replace):
             mr.set_dir_file_list(dir_file_list, replace)
-            mr.sort_file_list(need_save_list)
+            # 顺序命名模式：按智能排序编号，并接续目录最大序号
+            if is_order_mode:
+                max_existing = max(mr.dir_filename_dict.keys(), default=0)
+                seq_start = _parse_order_start(task, max_existing + 1)
+                need_save_list = sorted(
+                    need_save_list,
+                    key=lambda f: mr.order_sort_key(
+                        f.get("file_name", ""), f.get("updated_at")
+                    ),
+                    reverse=False,
+                )
+                for i, f in enumerate(need_save_list):
+                    f["file_name_re"] = _apply_seq_placeholders(
+                        f.get("file_name_re", ""), seq_start + i
+                    )
+            else:
+                mr.sort_file_list(need_save_list)
+        # 剧集命名模式：按集号排序（无集号则跳过）
+        elif is_episode_mode and re.search(r"\{E+\}", replace):
+            need_save_list = [
+                f for f in need_save_list if mr.episode_number(f.get("file_name", "")) is not None
+            ]
+            need_save_list.sort(
+                key=lambda f: mr.episode_sort_key(f.get("file_name", ""), f.get("updated_at"))
+            )
 
         # 转存文件
         fid_list = [item["fid"] for item in need_save_list]
