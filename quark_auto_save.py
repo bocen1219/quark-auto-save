@@ -223,6 +223,14 @@ class MagicRename:
             pattern = self.magic_regex[keyword]["pattern"]
             if replace == "":
                 replace = self.magic_regex[keyword]["replace"]
+        # 兼容占位符模式：
+        # - {}：顺序命名，占位符会转换为 {II}（默认两位补零），并由后续 {I+} 逻辑自动编号
+        # - []：剧集命名，占位符会转换为 {E}（从原文件名提取集编号）
+        if isinstance(replace, str) and replace:
+            if "{}" in replace and not re.search(r"\{I+\}", replace):
+                replace = replace.replace("{}", "{II}")
+            if "[]" in replace and "{E}" not in replace:
+                replace = replace.replace("[]", "{E}")
         return pattern, replace
 
     def sub(self, pattern, replace, file_name):
