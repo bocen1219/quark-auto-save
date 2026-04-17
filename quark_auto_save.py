@@ -1269,19 +1269,22 @@ class Quark:
                 except Exception:
                     return 0
 
-            # Python 排序稳定，分层排序实现混合倒序逻辑
+            # Python 排序稳定：从最末一级到最前一级做多次排序
+            # 对齐前端 `sortFileList()`：dir 优先 -> updated_at desc -> file_name 自然倒序 -> fid 兜底
             share_file_list = sorted(
                 share_file_list, key=lambda f: str(f.get("fid", "")), reverse=True
             )
             share_file_list = natsorted(
                 share_file_list,
-                key=lambda f: nk(mr._custom_sort_key(f.get("file_name", ""))),
+                key=lambda f: nk(str(f.get("file_name", "")).lower()),
                 reverse=True,
             )
             share_file_list = sorted(
                 share_file_list, key=lambda f: _updated_at_num(f), reverse=True
             )
-            share_file_list = sorted(share_file_list, key=lambda f: 0 if f.get("dir") else 1)
+            share_file_list = sorted(
+                share_file_list, key=lambda f: 0 if f.get("dir") else 1
+            )
         # 需保存的文件清单
         need_save_list = []
         startfid = str(task.get("startfid", "") or "")

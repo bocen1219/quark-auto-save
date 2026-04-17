@@ -409,18 +409,19 @@ def get_share_detail():
         pattern, replace = mr.magic_regex_conv(
             task.get("pattern", ""), task.get("replace", "")
         )
-        # 过滤与模式约束：预览与转存保持一致
-        if include_words or exclude_words:
-            data["list"] = [
-                f
-                for f in data["list"]
-                if (not exclude_words or not any(w in (f.get("file_name", "").lower()) for w in exclude_words))
-                and (not include_words or any(w in (f.get("file_name", "").lower()) for w in include_words))
-            ]
-        if is_order_mode or is_episode_mode:
-            data["list"] = [f for f in data["list"] if not f.get("dir")]
+        # 过滤：预览/选择弹窗中不删除条目，只影响是否生成 file_name_re（否则前端显示红叉）
+        def _hit_filter(name: str) -> bool:
+            s = (name or "").lower()
+            if exclude_words and any(w in s for w in exclude_words):
+                return True
+            if include_words:
+                return not any(w in s for w in include_words)
+            return False
 
         for share_file in data["list"]:
+            # 过滤命中：保留展示，但不生成替换结果（前端显示 ×），目录也保留以便继续进入
+            if _hit_filter(share_file.get("file_name", "")):
+                continue
             search_pattern = (
                 task["update_subdir"]
                 if share_file["dir"] and task.get("update_subdir")
@@ -428,6 +429,11 @@ def get_share_detail():
             )
             if re.search(search_pattern, share_file["file_name"]):
                 # 文件名重命名，目录不重命名
+                # 剧集模式：无法识别集号的文件，在预览中显示红叉（不要生成错误的新文件名）
+                if is_episode_mode and (not share_file.get("dir")) and re.search(r"\{E+\}", replace):
+                    if mr.episode_number(share_file.get("file_name", "")) is None:
+                        continue
+
                 file_name_re = (
                     share_file["file_name"]
                     if share_file["dir"]
@@ -448,28 +454,27 @@ def get_share_detail():
             if is_order_mode:
                 max_existing = max(mr.dir_filename_dict.keys(), default=0)
                 seq_start = _parse_order_start(task, max_existing + 1)
-                # 与后端转存保持一致：日期/期号/上中下/修改时间综合排序
-                data["list"] = sorted(
-                    data["list"],
+                # 顺序命名编号仅作用于“会生成 file_name_re 的文件”，不影响目录/未匹配项的展示
+                candidates = [
+                    f for f in data["list"]
+                    if (not f.get("dir")) and f.get("file_name_re")
+                ]
+                candidates = sorted(
+                    candidates,
                     key=lambda f: mr.order_sort_key(
                         f.get("file_name", ""), f.get("updated_at")
                     ),
                     reverse=False,
                 )
-                for i, f in enumerate(data["list"]):
-                    if f.get("file_name_re"):
-                        f["file_name_re"] = _apply_seq_placeholders(
-                            f.get("file_name_re", ""), seq_start + i
-                        )
+                for i, f in enumerate(candidates):
+                    f["file_name_re"] = _apply_seq_placeholders(
+                        f.get("file_name_re", ""), seq_start + i
+                    )
             else:
                 mr.sort_file_list(data["list"])
         elif is_episode_mode and re.search(r"\{E+\}", replace):
-            data["list"] = [
-                f for f in data["list"] if mr.episode_number(f.get("file_name", "")) is not None
-            ]
-            data["list"].sort(
-                key=lambda f: mr.episode_sort_key(f.get("file_name", ""), f.get("updated_at"))
-            )
+            # 预览不再过滤目录/文件；排序交给前端统一处理（避免和起始/结束选择的展示顺序不一致）
+            pass
 
     if request.json.get("task"):
         preview_regex(data)

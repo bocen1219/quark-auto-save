@@ -1254,10 +1254,8 @@
           }).then(response => {
             if (response.data.success) {
               this.fileSelect.fileList = response.data.data.list;
-              // 正则处理预览的顺序由后端生成（含剧集/顺序命名规则），前端不再二次覆盖排序
-              if (!this.fileSelect.previewRegex) {
-                this.sortFileList(this.fileSelect.sortBy, this.fileSelect.sortOrder);
-              }
+              // 统一所有弹窗的展示顺序：与起始/结束选择使用同一套排序
+              this.sortFileList(this.fileSelect.sortBy, this.fileSelect.sortOrder);
               this.fileSelect.paths = response.data.data.paths;
               this.fileSelect.stoken = response.data.data.stoken;
             } else {
