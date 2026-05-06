@@ -2,6 +2,7 @@
 
 import platform
 import os
+import shutil
 
 PLUGINS_DIR = "plugins"
 
@@ -23,14 +24,22 @@ def clean_plugins():
                 )
             else:
                 print(f"Removing: {f}")
-                os.remove(os.path.join(PLUGINS_DIR, f))
+                _remove_plugin_entry(f)
 
         elif f.endswith(".py") or f.endswith(".json"):
             print(f"Keeping: {f}")
 
         else:
             print(f"Removing: {f}")
-            os.remove(os.path.join(PLUGINS_DIR, f))
+            _remove_plugin_entry(f)
+
+
+def _remove_plugin_entry(name):
+    path = os.path.join(PLUGINS_DIR, name)
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
 
 
 if __name__ == "__main__":

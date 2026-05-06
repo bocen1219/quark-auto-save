@@ -358,7 +358,7 @@
                       <div class="input-group">
                         <input type="text" name="shareurl[]" class="form-control" v-model="task.shareurl" placeholder="必填" @blur="changeShareurl(task)">
                         <div class="input-group-append" v-if="task.shareurl">
-                          <button type="button" class="btn btn-outline-secondary" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=false;fileSelect.sortBy='file_name';fileSelect.sortOrder='desc';showShareSelect(index)" title="选择文件夹"><i class="bi bi-folder"></i></button>
+                          <button type="button" class="btn btn-outline-secondary" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=false;fileSelect.episodeMode=false;fileSelect.sortBy='file_name';fileSelect.sortOrder='desc';showShareSelect(index)" title="选择文件夹"><i class="bi bi-folder"></i></button>
                           <div class="input-group-text">
                             <a target="_blank" :href="task.shareurl"><i class="bi bi-box-arrow-up-right"></i></a>
                           </div>
@@ -378,15 +378,15 @@
                       </div>
                     </div>
                   </div>
-                  <div class="form-group row" title="可用作筛选，只转存匹配到的文件名的文件，留空则转存所有文件">
+                  <div class="form-group row" title="写 S11E{}、E{} 即综艺模式。未填「包含」时：所有文件都参与，再按日期（旧→新）、数字、同档上→下排序后依次编号；填「包含」则只留文件名里含该关键字的">
                     <label class="col-sm-2 col-form-label">保存规则</label>
                     <div class="col-sm-10">
                       <div class="input-group">
                         <div class="input-group-prepend">
-                          <button class="btn btn-outline-secondary" type="button" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=true;fileSelect.sortBy='file_name';fileSelect.sortOrder='asc';showShareSelect(index)" title="预览正则处理效果">正则处理</button>
+                          <button class="btn btn-outline-secondary" type="button" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=true;fileSelect.sortBy='file_name';openRegexPreview(index);showShareSelect(index)" title="预览正则处理效果">正则处理</button>
                         </div>
                         <input type="text" name="pattern[]" class="form-control" v-model="task.pattern" placeholder="匹配表达式" list="magicRegex" @dblclick="inputRawMagicRegex(task)" title="双击可将魔法匹配释放为填入原始正则表达式">
-                        <input type="text" name="replace[]" class="form-control" v-model="task.replace" placeholder="替换表达式">
+                        <input type="text" name="replace[]" class="form-control" v-model="task.replace" placeholder="替换；综艺可空，默认同 S{VS}E{VE} 顺序编号" title="综艺且填起始时：留空则按 S{VS}E{VE} 重命名；自写需含 {VS} 季 {VE} 集">
                         <div class="input-group-append" title="保存时只比较文件名的部分，01.mp4 和 01.mkv 视同为同一文件，不重复转存">
                           <div class="input-group-text">
                             <input type="checkbox" v-model="task.ignore_extension">&nbsp;忽略后缀
@@ -402,9 +402,28 @@
                     <label class="col-sm-2 col-form-label">文件起始</label>
                     <div class="col-sm-10">
                       <div class="input-group">
-                        <input type="text" class="form-control" placeholder="可选，只转存修改日期>此文件的文件" name="startfid[]" v-model="task.startfid">
+                        <input type="text" class="form-control" placeholder="可选；按综艺时间序从所选文件起往后（含），与列表排序无关" name="startfid[]" v-model="task.startfid">
                         <div class="input-group-append" v-if="task.shareurl">
-                          <button class="btn btn-outline-secondary" type="button" @click="fileSelect.selectDir=false;fileSelect.switchShare=false;fileSelect.previewRegex=false;fileSelect.sortBy='updated_at';fileSelect.sortOrder='desc';showShareSelect(index)">选择</button>
+                          <button class="btn btn-outline-secondary" type="button" @click="openStartFileSelect(index)">选择</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-group row" title="包含、排除均可多项（英文或中文逗号分隔），满足任一即算命中；不填包含则全文件参与后再排序编号">
+                    <label class="col-sm-2 col-form-label">综艺（附加）</label>
+                    <div class="col-sm-10">
+                      <div class="form-row">
+                        <div class="col-md-4 mb-2 mb-md-0">
+                          <label class="small text-muted d-block">起始（可选）</label>
+                          <input type="text" class="form-control form-control-sm" v-model="task.variety_start_sort" :name="'variety_start_sort[]'" placeholder="S11E22，用于替换里 {VS}{VE} 起点">
+                        </div>
+                        <div class="col-md-4 mb-2 mb-md-0">
+                          <label class="small text-muted d-block">包含（可选）</label>
+                          <input type="text" class="form-control form-control-sm" v-model="task.variety_include" :name="'variety_include[]'" placeholder="可选；多项用逗号分隔，任一命中；支持 E{} 等占位">
+                        </div>
+                        <div class="col-md-4">
+                          <label class="small text-muted d-block">排除（可选）</label>
+                          <input type="text" class="form-control form-control-sm" v-model="task.variety_exclude" :name="'variety_exclude[]'" placeholder="可空；多项逗号隔开，任一命中则排除">
                         </div>
                       </div>
                     </div>
@@ -494,9 +513,9 @@
         <div class="modal-content">
           <div class="modal-header">
             <h5 class="modal-title">
-              <b v-if="fileSelect.previewRegex">正则处理预览</b>
+              <b v-if="fileSelect.previewRegex">正则处理预览<span v-if="fileSelect.episodeMode" class="badge badge-secondary ml-1" title="按剧集文件名数字倒序（如 E10→E09）">剧集排序</span></b>
               <b v-else-if="fileSelect.selectDir">选择{{fileSelect.selectShare ? '需转存的' : '保存到的'}}文件夹</b>
-              <b v-else>选择起始文件</b>
+              <b v-else>选择起始文件<span v-if="fileSelect.episodeMode" class="badge badge-secondary ml-1" title="按剧集文件名数字倒序（如 E10→E09）">剧集排序</span></b>
               <div v-if="modalLoading" class="spinner-border spinner-border-sm m-1" role="status"></div>
             </h5>
             <button type="button" class="close" data-dismiss="modal" aria-label="Close">
@@ -656,7 +675,10 @@
           enddate: "",
           addition: {},
           ignore_extension: false,
-          runweek: [1, 2, 3, 4, 5, 6, 7]
+          runweek: [1, 2, 3, 4, 5, 6, 7],
+          variety_start_sort: "",
+          variety_include: "",
+          variety_exclude: ""
         },
         run_log: "",
         taskDirs: [""],
@@ -685,6 +707,7 @@
           selectShare: true,
           switchShare: false,
           previewRegex: false,
+          episodeMode: false,
           sortBy: "updated_at",
           sortOrder: "desc"
         },
@@ -758,6 +781,11 @@
               config_data.tasklist = config_data.tasklist.map(task => {
                 if (!task.hasOwnProperty('runweek')) {
                   task.runweek = [1, 2, 3, 4, 5, 6, 7];
+                }
+                if (!task.hasOwnProperty('variety_include')) {
+                  task.variety_start_sort = task.variety_start_sort || '';
+                  task.variety_include = '';
+                  task.variety_exclude = '';
                 }
                 return task;
               });
@@ -1078,6 +1106,7 @@
           this.fileSelect.selectDir = true;
           this.fileSelect.switchShare = true;
           this.fileSelect.previewRegex = false;
+          this.fileSelect.episodeMode = false;
           this.fileSelect.share = suggestion;
           this.showShareSelect(index, suggestion.shareurl);
         },
@@ -1141,6 +1170,7 @@
           this.fileSelect.selectDir = true;
           this.fileSelect.switchShare = false;
           this.fileSelect.previewRegex = false;
+          this.fileSelect.episodeMode = false;
           this.fileSelect.error = undefined;
           this.fileSelect.fileList = [];
           this.fileSelect.paths = [];
@@ -1259,9 +1289,22 @@
             this.fileSelect.sortOrder = order || "asc";
           }
 
+          const useNaturalEpisodeFileName =
+            this.fileSelect.episodeMode &&
+            this.fileSelect.sortBy === "file_name" &&
+            (this.fileSelect.previewRegex || !this.fileSelect.selectDir);
+
           this.fileSelect.fileList.sort((a, b) => {
             let valA = a[this.fileSelect.sortBy];
             let valB = b[this.fileSelect.sortBy];
+
+            if (useNaturalEpisodeFileName) {
+              const cmp = String(valA ?? "").localeCompare(String(valB ?? ""), undefined, {
+                numeric: true,
+                sensitivity: "base",
+              });
+              return this.fileSelect.sortOrder === "asc" ? cmp : -cmp;
+            }
 
             if (typeof valA === "string") valA = valA.toLowerCase();
             if (typeof valB === "string") valB = valB.toLowerCase();
@@ -1270,6 +1313,48 @@
             if (valA > valB) return this.fileSelect.sortOrder === "asc" ? 1 : -1;
             return 0;
           });
+        },
+        openRegexPreview(index) {
+          this.fileSelect.episodeMode = this.isEpisodePatternTask(this.formData.tasklist[index]);
+          this.fileSelect.sortOrder = this.fileSelect.episodeMode ? "desc" : "asc";
+        },
+        openStartFileSelect(index) {
+          this.fileSelect.selectDir = false;
+          this.fileSelect.switchShare = false;
+          this.fileSelect.previewRegex = false;
+          this.fileSelect.episodeMode = this.isEpisodePatternTask(
+            this.formData.tasklist[index]
+          );
+          if (this.fileSelect.episodeMode) {
+            this.fileSelect.sortBy = "file_name";
+            this.fileSelect.sortOrder = "desc";
+          } else {
+            this.fileSelect.sortBy = "updated_at";
+            this.fileSelect.sortOrder = "desc";
+          }
+          this.showShareSelect(index);
+        },
+        isEpisodePatternTask(task) {
+          if (!task || task.pattern === undefined || task.pattern === "") return false;
+          const rawPattern = task.pattern;
+          const magic = this.formData.magic_regex[rawPattern];
+          const patternStr = magic ? (magic.pattern || "") : rawPattern;
+          if (/E\{\}|S\d{1,2}E\{\}|SXXE\{\}/.test(patternStr)) return true;
+          if (rawPattern === "$TV") return true;
+          if (/E\[\]/.test(rawPattern) || /SXXE\[\]/.test(rawPattern)) return true;
+          if (/^S\d{1,2}E\[\]$/.test(rawPattern)) return true;
+
+          const replaceStr = magic
+            ? (task.replace !== undefined && task.replace !== ""
+                ? task.replace
+                : (magic.replace || ""))
+            : (task.replace || "");
+
+          if (/[Ss]\d{1,2}[Ee]/.test(patternStr)) return true;
+          if (/[Ss]\d{1,2}/.test(patternStr) && /\d{1,3}/.test(patternStr) && /[Ee]/.test(patternStr))
+            return true;
+          if (/\{E\}/.test(replaceStr) || /\{SXX\}/.test(replaceStr)) return true;
+          return false;
         },
         inputRawMagicRegex(task) {
           const item = this.formData.magic_regex[task.pattern];

@@ -31,7 +31,16 @@ import re
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
-from quark_auto_save import Quark, Config, MagicRename
+from quark_auto_save import (
+    Quark,
+    Config,
+    MagicRename,
+    variety_filename_search_pattern,
+    is_variety_pattern_task,
+    variety_assign_sequential_names,
+    variety_startfid_allowed_fids,
+    variety_exclude_matches,
+)
 
 print(
     r"""
@@ -359,7 +368,9 @@ def get_share_detail():
     # 正则处理预览
     def preview_regex(data):
         task = request.json.get("task", {})
-        magic_regex = request.json.get("magic_regex", {})
+        req_mr = request.json.get("magic_regex") or {}
+        base_mr = config_data.get("magic_regex") or {}
+        magic_regex = {**base_mr, **req_mr}
         mr = MagicRename(magic_regex)
         mr.set_taskname(task.get("taskname", ""))
         account = Quark(config_data["cookie"][0])
@@ -374,13 +385,27 @@ def get_share_detail():
         pattern, replace = mr.magic_regex_conv(
             task.get("pattern", ""), task.get("replace", "")
         )
+        allowed_after_start = variety_startfid_allowed_fids(
+            data["list"], task.get("startfid") or ""
+        )
+
         for share_file in data["list"]:
+            if allowed_after_start is not None:
+                if not share_file.get("dir"):
+                    if str(share_file.get("fid", "")) not in allowed_after_start:
+                        continue
             search_pattern = (
                 task["update_subdir"]
                 if share_file["dir"] and task.get("update_subdir")
-                else pattern
+                else variety_filename_search_pattern(task, pattern, magic_regex)
             )
-            if re.search(search_pattern, share_file["file_name"]):
+            matched = bool(re.search(search_pattern, share_file["file_name"]))
+            if matched and is_variety_pattern_task(task, magic_regex) and variety_exclude_matches(
+                share_file["file_name"], task
+            ):
+                matched = False
+            if matched:
+                share_file["_variety_matched"] = True
                 # 文件名重命名，目录不重命名
                 file_name_re = (
                     share_file["file_name"]
@@ -395,6 +420,32 @@ def get_share_detail():
                     share_file["file_name_saved"] = file_name_saved
                 else:
                     share_file["file_name_re"] = file_name_re
+
+        if is_variety_pattern_task(task, magic_regex):
+            variety_assign_sequential_names(
+                data["list"],
+                task,
+                magic_regex,
+                replace,
+                sort_first=True,
+                item_filter=lambda x: x.get("_variety_matched"),
+            )
+            _ign = task.get("ignore_extension")
+            for sf in data["list"]:
+                if sf.get("dir"):
+                    continue
+                final = sf.get("file_name_re")
+                if not final:
+                    continue
+                if existing := mr.is_exists(
+                    final, dir_filename_list, _ign and not sf.get("dir")
+                ):
+                    sf["file_name_saved"] = existing
+                    sf.pop("file_name_re", None)
+                else:
+                    sf.pop("file_name_saved", None)
+        for sf in data["list"]:
+            sf.pop("_variety_matched", None)
 
         # 文件列表排序
         if re.search(r"\{I+\}", replace):

@@ -143,6 +143,32 @@ class Config:
         for task in config_data.get("tasklist", []):
             if "$TASKNAME" in task.get("replace", ""):
                 task["replace"] = task["replace"].replace("$TASKNAME", "{TASKNAME}")
+            task.setdefault("variety_start_sort", "")
+            task.setdefault("variety_include", "")
+            task.setdefault("variety_exclude", "")
+
+
+# 匹配式中的 E{} / SXXE{}（须在 MagicRename 之前定义，供 magic_regex_conv 使用）
+_VARIETY_TOKEN = re.compile(r"(S\d{1,2}E\{\}|SXXE\{\}|E\{\})")
+
+
+def variety_template_to_regex(template: str) -> str:
+    """E{}、S11E{}、SXXE{} 转为合法正则可片段；其余字面转义。"""
+    if not template:
+        return ""
+    parts = _VARIETY_TOKEN.split(template)
+    out = []
+    for part in parts:
+        if part == "E{}":
+            out.append(r"(?:[Ee])(\d{1,3})")
+        elif part == "SXXE{}":
+            out.append(r"(?:[Ss])(\d{1,2})(?:[Ee])(\d{1,3})")
+        elif part and re.fullmatch(r"S\d{1,2}E\{\}", part):
+            sn = re.match(r"S(\d{1,2})E", part).group(1)
+            out.append(r"(?:[Ss])" + sn + r"(?:[Ee])(\d{1,3})")
+        else:
+            out.append(re.escape(part))
+    return "".join(out)
 
 
 class MagicRename:
@@ -223,6 +249,22 @@ class MagicRename:
             pattern = self.magic_regex[keyword]["pattern"]
             if replace == "":
                 replace = self.magic_regex[keyword]["replace"]
+        elif pattern in ("E[]", "SXXE[]"):
+            # 剧集占位符：非合法 Python 正则（E[] 会触发 unterminated character set），映射为 $TV
+            tv = self.magic_regex.get("$TV") or MagicRename.magic_regex["$TV"]
+            pattern = tv["pattern"]
+            if replace == "":
+                replace = tv["replace"]
+        else:
+            m = re.fullmatch(r"S(\d{1,2})E\[\]", pattern or "")
+            if m:
+                # 如 S01E[] → 重命名为 S01E集数.扩展名（与 $TV 相同的捕获组 \2 \3）
+                tv = self.magic_regex.get("$TV") or MagicRename.magic_regex["$TV"]
+                pattern = tv["pattern"]
+                if replace == "":
+                    replace = "S" + m.group(1) + r"E\2.\3"
+        if pattern and _VARIETY_TOKEN.search(pattern):
+            pattern = variety_template_to_regex(pattern)
         return pattern, replace
 
     def sub(self, pattern, replace, file_name):
@@ -353,6 +395,306 @@ class MagicRename:
             return None
         else:
             return filename if filename in filename_list else None
+
+
+# --- 综艺：由任务「匹配」中的 E{} / SXXE{} 启用；包含/排除支持逗号多项；替换中 {VS}{VE} 按序编号 ---
+
+
+def effective_task_pattern(task: dict, magic_regex: dict) -> str:
+    p = task.get("pattern", "") or ""
+    if magic_regex and p in magic_regex:
+        return (magic_regex[p] or {}).get("pattern", "") or ""
+    return p
+
+
+def is_variety_pattern_task(task: dict, magic_regex: dict) -> bool:
+    return bool(_VARIETY_TOKEN.search(effective_task_pattern(task, magic_regex or {})))
+
+
+def variety_effective_include_text(task: dict) -> str:
+    """用户填写的「包含」原文；未填表示不按关键字筛选（仅排除 + 时间序排序）。"""
+    return (task.get("variety_include") or "").strip()
+
+
+def variety_split_csv_terms(text: str) -> list:
+    """逗号分隔多项（支持英文、中文逗号），每项独立参与匹配（包含任一命中；排除任一命中则剔除）。"""
+    if not text or not str(text).strip():
+        return []
+    s = str(text).replace("\uff0c", ",")
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+
+def variety_compile_term_regexes(terms: list) -> list:
+    """每项经 variety_template_to_regex；无效项跳过。"""
+    out = []
+    for t in terms:
+        try:
+            rx = variety_template_to_regex(t)
+            re.compile(rx)
+            out.append(rx)
+        except re.error:
+            continue
+    return out
+
+
+def variety_include_regex_list(task: dict):
+    """None：未填包含（视为全部命中）；list：至少一项正则；空 list：无有效规则。"""
+    terms = variety_split_csv_terms(variety_effective_include_text(task))
+    if not terms:
+        return None
+    return variety_compile_term_regexes(terms)
+
+
+def variety_exclude_regex_list(task: dict) -> list:
+    terms = variety_split_csv_terms((task.get("variety_exclude") or "").strip())
+    return variety_compile_term_regexes(terms)
+
+
+def variety_include_matches(name: str, task: dict) -> bool:
+    lst = variety_include_regex_list(task)
+    if lst is None:
+        return True
+    if not lst:
+        return False
+    return any(re.search(r, name) for r in lst)
+
+
+def variety_exclude_matches(name: str, task: dict) -> bool:
+    return any(re.search(r, name) for r in variety_exclude_regex_list(task))
+
+
+def variety_season_from_pattern(task: dict, magic_regex: dict) -> int:
+    """从匹配式 S11E{}、S05E{} 解析季号；仅 E{} / SXXE{} 时默认 1。"""
+    p = effective_task_pattern(task, magic_regex or {})
+    m = re.search(r"[Ss](\d{1,2})E\{\}", p)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def variety_filename_search_pattern(
+    task: dict, pattern: str, magic_regex: dict
+) -> str:
+    """综艺选文件：不用展开后的 SxxE\\d 作为唯一条件。包含多项逗号隔开时为 OR。"""
+    if not is_variety_pattern_task(task, magic_regex or {}):
+        return pattern
+    inc_list = variety_include_regex_list(task)
+    if inc_list is None:
+        return r"(?s).*"
+    if not inc_list:
+        return r"(?!)"
+    if len(inc_list) == 1:
+        return inc_list[0]
+    return "(?:" + ")|(?:".join(inc_list) + ")"
+
+
+def _parse_start_sxe(start_s: str):
+    m = re.match(
+        r"^\s*[Ss](\d{1,2})[Ee](\d{1,3})\s*$", (start_s or "").strip()
+    )
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _variety_rest_after_leading_date(base: str) -> str:
+    """去掉文件名前的日期段，避免把 YYYYMMDD 误当成期数。"""
+    m = re.match(r"^(\d{8})[\._]", base)
+    if m:
+        return base[m.end() :]
+    m = re.match(r"^(20\d{2})[\.\-](\d{1,2})[\.\-](\d{1,2})", base)
+    if m:
+        return base[m.end() :]
+    return base
+
+
+def _variety_extract_date_val(base: str) -> int:
+    m = re.match(r"^(\d{8})[\._]", base)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"^(20\d{2})[\.\-](\d{1,2})[\.\-](\d{1,2})", base)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return y * 10000 + mo * 100 + d
+    m = re.search(r"(20\d{2})[^\d]?(\d{1,2})[^\d]?(\d{1,2})", base)
+    if m:
+        return int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(
+            m.group(3)
+        )
+    return 0
+
+
+def _variety_extract_num_pri(base: str) -> int:
+    """期数/案号等，仅在去掉行首日期后的片段里取数。"""
+    rest = _variety_rest_after_leading_date(base)
+    num_pri = 0
+    for rx in (
+        r"第(\d{1,3})[期集]",
+        r"加时营业第(\d{1,3})期",
+        r"(\d{1,2})(?=案)",
+        r"[：:](\d{1,3})[：:]",
+    ):
+        mx = re.search(rx, rest)
+        if mx:
+            num_pri = max(num_pri, int(mx.group(1)))
+    if num_pri == 0:
+        mx = re.search(r"(\d{1,3})", rest)
+        if mx:
+            num_pri = int(mx.group(1))
+    return num_pri
+
+
+def _variety_generic_sort_key(filename: str) -> tuple:
+    """剧情时间线编号顺序：日期升序（旧→新）→ 期数 → 同档上→下 → 文件名稳定排序。"""
+    base = os.path.basename(filename)
+    date_val = _variety_extract_date_val(base)
+    num_pri = _variety_extract_num_pri(base)
+    ud_key = 2
+    if "上" in base:
+        ud_key = 0
+    elif "下" in base:
+        ud_key = 1
+    return (date_val, num_pri, ud_key, base)
+
+
+def variety_startfid_allowed_fids(share_file_list: list, startfid: str):
+    """
+    指定 startfid：先把列表中非目录项按 _variety_generic_sort_key 排序，再只保留从所选
+    文件起（含）往后的 fid。分享接口顺序常为日期新在前，若按列表顺序截取会误带上更早的集。
+    未指定：返回 None（不过滤）。找不到 fid：返回空 frozenset。
+    """
+    sf = (startfid or "").strip()
+    if not sf:
+        return None
+    files_only = [x for x in share_file_list if not x.get("dir")]
+    files_only.sort(
+        key=lambda x: _variety_generic_sort_key(x.get("file_name", ""))
+    )
+    idx = next(
+        (
+            i
+            for i, f in enumerate(files_only)
+            if str(f.get("fid", "")) == str(sf)
+        ),
+        None,
+    )
+    if idx is None:
+        return frozenset()
+    return frozenset(
+        str(f.get("fid", "")) for f in files_only[idx:]
+    )
+
+
+_MEDIA_EXT = frozenset(
+    {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".mpg", ".mpeg"}
+)
+
+
+def variety_apply_sequential_name(
+    original_filename: str, replace_template: str, season: int, episode: int
+) -> str:
+    """不依赖正则能否匹配文件名，直接把 {VS}{VE} 填入模板并保留原扩展名。"""
+    rep = (replace_template or "").strip() or "S{VS}E{VE}"
+    base = rep
+    if "{VS}" in base:
+        base = base.replace("{VS}", str(season).zfill(2))
+    if "{VE}" in base:
+        base = base.replace("{VE}", str(episode).zfill(2))
+    _, orig_ext = os.path.splitext(original_filename)
+    low = base.lower()
+    if any(low.endswith(sfx) for sfx in _MEDIA_EXT):
+        return base
+    return base + orig_ext
+
+
+def variety_assign_sequential_names(
+    items: list,
+    task: dict,
+    magic_regex: dict,
+    replace_after_conv: str,
+    *,
+    sort_first: bool = True,
+    item_filter=None,
+) -> None:
+    """
+    综艺顺序命名：替换为空时使用 S{VS}E{VE}。
+    replace 中若无 {VE}/{VS} 则不改名（保留前面的 mr.sub 结果）。
+    sort_first：预览等为 True；转存 need_save_list 已排序则为 False。
+    item_filter：仅处理满足条件的项（预览：仅匹配成功的文件）。
+    """
+    if not is_variety_pattern_task(task, magic_regex):
+        return
+    rep = (replace_after_conv or "").strip()
+    if rep and "{VE}" not in rep and "{VS}" not in rep:
+        return
+    if not rep:
+        rep = "S{VS}E{VE}"
+    start = _parse_start_sxe(task.get("variety_start_sort") or "")
+    work = [x for x in items if not x.get("dir")]
+    if item_filter:
+        work = [x for x in work if item_filter(x)]
+    else:
+        tmp = []
+        for x in work:
+            name = x.get("file_name", "")
+            if not variety_include_matches(name, task):
+                continue
+            if variety_exclude_matches(name, task):
+                continue
+            tmp.append(x)
+        work = tmp
+    if sort_first:
+        work.sort(
+            key=lambda x: _variety_generic_sort_key(x.get("file_name", ""))
+        )
+    idx = 0
+    for item in work:
+        if start:
+            se, ep0 = start
+            ep = ep0 + idx
+            se_use = se
+        else:
+            se_use = variety_season_from_pattern(task, magic_regex)
+            ep = 1 + idx
+        idx += 1
+        item["file_name_re"] = variety_apply_sequential_name(
+            item["file_name"], rep, se_use, ep
+        )
+
+
+def apply_variety_filter_sort(items: list, task: dict, magic_regex: dict) -> list:
+    """仅当匹配式含 E{} / SXXE{}。包含/排除均支持逗号多项（OR）。"""
+    if not is_variety_pattern_task(task, magic_regex):
+        return items
+
+    dirs = []
+    files = []
+    for item in items:
+        name = item.get("file_name", "")
+        if item.get("dir"):
+            dirs.append(item)
+            continue
+        if not variety_include_matches(name, task):
+            continue
+        if variety_exclude_matches(name, task):
+            continue
+        files.append(item)
+
+    files.sort(key=lambda it: _variety_generic_sort_key(it.get("file_name", "")))
+    return dirs + files
+
+
+def apply_variety_numbered_renames(
+    mr, task: dict, pattern: str, replace: str, need_save_list: list, magic_regex: dict
+) -> None:
+    """综艺顺序命名（默认 S{VS}E{VE}），need_save_list 已由 apply_variety_filter_sort 排好序。"""
+    variety_assign_sequential_names(
+        need_save_list,
+        task,
+        magic_regex,
+        replace,
+        sort_first=False,
+    )
 
 
 class Quark:
@@ -889,17 +1231,32 @@ class Quark:
         pattern, replace = mr.magic_regex_conv(
             task.get("pattern", ""), task.get("replace", "")
         )
+        _mr_cfg = CONFIG_DATA.get("magic_regex", {})
         # 需保存的文件清单
         need_save_list = []
-        # 添加符合的
+        _allowed_after_start = variety_startfid_allowed_fids(
+            share_file_list, task.get("startfid") or ""
+        )
+        # 添加符合的（startfid：按综艺时间序从所选文件起往后；目录不按 fid 集过滤）
         for share_file in share_file_list:
+            if _allowed_after_start is not None:
+                if not share_file.get("dir"):
+                    if str(share_file.get("fid", "")) not in _allowed_after_start:
+                        continue
             search_pattern = (
                 task["update_subdir"]
                 if share_file["dir"] and task.get("update_subdir")
-                else pattern
+                else variety_filename_search_pattern(task, pattern, _mr_cfg)
             )
             # 正则文件名匹配
-            if re.search(search_pattern, share_file["file_name"]):
+            matched = bool(
+                re.search(search_pattern, share_file["file_name"])
+            )
+            if matched and is_variety_pattern_task(task, _mr_cfg) and variety_exclude_matches(
+                share_file["file_name"], task
+            ):
+                matched = False
+            if matched:
                 # 判断原文件名是否存在，处理忽略扩展名
                 if not mr.is_exists(
                     share_file["file_name"],
@@ -971,9 +1328,22 @@ class Quark:
                                     },
                                 )
                                 tree.merge(share_file["fid"], subdir_tree, deep=False)
-            # 指定文件开始订阅/到达指定文件（含）结束历遍
-            if share_file["fid"] == task.get("startfid", ""):
-                break
+
+        if is_variety_pattern_task(task, _mr_cfg):
+            need_save_list = apply_variety_filter_sort(need_save_list, task, _mr_cfg)
+            apply_variety_numbered_renames(
+                mr, task, pattern, replace, need_save_list, _mr_cfg
+            )
+            _ign = task.get("ignore_extension")
+            need_save_list = [
+                item
+                for item in need_save_list
+                if not mr.is_exists(
+                    item.get("file_name_re") or "",
+                    dir_filename_list,
+                    _ign,
+                )
+            ]
 
         if re.search(r"\{I+\}", replace):
             mr.set_dir_file_list(dir_file_list, replace)
