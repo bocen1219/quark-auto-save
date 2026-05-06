@@ -2,3 +2,4 @@ quark_config_debug.json
 __pycache__
 /config
 .vscode
+quark-auto-save/config/quark_config.json
