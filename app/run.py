@@ -40,6 +40,7 @@ from quark_auto_save import (
     variety_assign_sequential_names,
     variety_startfid_allowed_fids,
     variety_exclude_matches,
+    variety_manual_order_list,
 )
 
 print(
@@ -422,12 +423,19 @@ def get_share_detail():
                     share_file["file_name_re"] = file_name_re
 
         if is_variety_pattern_task(task, magic_regex):
+            # 手动排序优先
+            manual_order = variety_manual_order_list(task)
+            if manual_order:
+                order_map = {name: i for i, name in enumerate(manual_order)}
+                data["list"].sort(
+                    key=lambda it: order_map.get(it.get("file_name", ""), 99999)
+                )
             variety_assign_sequential_names(
                 data["list"],
                 task,
                 magic_regex,
                 replace,
-                sort_first=True,
+                sort_first=not bool(manual_order),
                 item_filter=lambda x: x.get("_variety_matched"),
             )
             _ign = task.get("ignore_extension")
@@ -444,8 +452,7 @@ def get_share_detail():
                     sf.pop("file_name_re", None)
                 else:
                     sf.pop("file_name_saved", None)
-        for sf in data["list"]:
-            sf.pop("_variety_matched", None)
+        # 不删除 _variety_matched，供前端手动排序等功能使用
 
         # 文件列表排序
         if re.search(r"\{I+\}", replace):

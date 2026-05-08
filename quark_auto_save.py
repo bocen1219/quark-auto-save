@@ -146,6 +146,7 @@ class Config:
             task.setdefault("variety_start_sort", "")
             task.setdefault("variety_include", "")
             task.setdefault("variety_exclude", "")
+            task.setdefault("variety_manual_order", [])
 
 
 # 匹配式中的 E{} / SXXE{}（须在 MagicRename 之前定义，供 magic_regex_conv 使用）
@@ -272,6 +273,7 @@ class MagicRename:
         if not replace:
             return file_name
         # 预处理替换变量
+        match = None
         for key, p_list in self.magic_variable.items():
             if key in replace:
                 # 正则类替换变量
@@ -626,6 +628,7 @@ def variety_assign_sequential_names(
         return
     rep = (replace_after_conv or "").strip()
     if rep and "{VE}" not in rep and "{VS}" not in rep:
+        print("⚠️ 综艺模式：替换模板不含 {VE}/{VS}，跳过顺序命名，保留原正则替换结果")
         return
     if not rep:
         rep = "S{VS}E{VE}"
@@ -662,8 +665,13 @@ def variety_assign_sequential_names(
         )
 
 
+def variety_manual_order_list(task: dict) -> list:
+    """获取综艺手动排序列表（文件名列表）。"""
+    return task.get("variety_manual_order") or []
+
+
 def apply_variety_filter_sort(items: list, task: dict, magic_regex: dict) -> list:
-    """仅当匹配式含 E{} / SXXE{}。包含/排除均支持逗号多项（OR）。"""
+    """仅当匹配式含 E{} / SXXE{}。包含/排除均支持逗号多项（OR）。支持手动排序。"""
     if not is_variety_pattern_task(task, magic_regex):
         return items
 
@@ -680,7 +688,13 @@ def apply_variety_filter_sort(items: list, task: dict, magic_regex: dict) -> lis
             continue
         files.append(item)
 
-    files.sort(key=lambda it: _variety_generic_sort_key(it.get("file_name", "")))
+    # 手动排序优先
+    manual_order = variety_manual_order_list(task)
+    if manual_order:
+        order_map = {name: i for i, name in enumerate(manual_order)}
+        files.sort(key=lambda it: order_map.get(it.get("file_name", ""), 99999))
+    else:
+        files.sort(key=lambda it: _variety_generic_sort_key(it.get("file_name", "")))
     return dirs + files
 
 
