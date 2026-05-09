@@ -57,7 +57,7 @@ docker compose up -d quark-auto-save
 cd /volume1/docker/你的compose目录
 
 docker compose pull quark-auto-save
-docker compose up -d quark-auto-save
+docker compose up -d --force-recreate quark-auto-save
 ```
 
 ### 更新所有容器
