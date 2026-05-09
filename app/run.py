@@ -37,10 +37,12 @@ from quark_auto_save import (
     MagicRename,
     variety_filename_search_pattern,
     is_variety_pattern_task,
+    is_episode_pattern_task,
     variety_assign_sequential_names,
     variety_startfid_allowed_fids,
     variety_exclude_matches,
     variety_manual_order_list,
+    apply_episode_sequential_names,
 )
 
 print(
@@ -401,7 +403,7 @@ def get_share_detail():
                 else variety_filename_search_pattern(task, pattern, magic_regex)
             )
             matched = bool(re.search(search_pattern, share_file["file_name"]))
-            if matched and is_variety_pattern_task(task, magic_regex) and variety_exclude_matches(
+            if matched and (is_variety_pattern_task(task, magic_regex) or is_episode_pattern_task(task, magic_regex)) and variety_exclude_matches(
                 share_file["file_name"], task
             ):
                 matched = False
@@ -436,6 +438,28 @@ def get_share_detail():
                 magic_regex,
                 replace,
                 sort_first=not bool(manual_order),
+                item_filter=lambda x: x.get("_variety_matched"),
+            )
+            _ign = task.get("ignore_extension")
+            for sf in data["list"]:
+                if sf.get("dir"):
+                    continue
+                final = sf.get("file_name_re")
+                if not final:
+                    continue
+                if existing := mr.is_exists(
+                    final, dir_filename_list, _ign and not sf.get("dir")
+                ):
+                    sf["file_name_saved"] = existing
+                    sf.pop("file_name_re", None)
+                else:
+                    sf.pop("file_name_saved", None)
+        elif is_episode_pattern_task(task, magic_regex):
+            apply_episode_sequential_names(
+                data["list"],
+                task,
+                magic_regex,
+                replace,
                 item_filter=lambda x: x.get("_variety_matched"),
             )
             _ign = task.get("ignore_extension")
