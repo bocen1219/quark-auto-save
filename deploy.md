@@ -15,7 +15,7 @@ docker build -t boboji257/quark-auto-save:test .
 
 ```bash
 # 用 test 标签启动测试容器
-docker run -d --name qas-test -p 5005:5005 boboji257/quark-auto-save:test
+cd E:/quark-auto-save; docker build -t boboji257/quark-auto-save:test .; docker rm -f quark-auto-save; docker run -d --name quark-auto-save -p 5005:5005 -v "E:/quark-auto-save/quark-auto-save/config:/app/config" -v "E:/quark-auto-save/quark-auto-save/media:/app/media" -e TZ=Asia/Shanghai boboji257/quark-auto-save:test
 
 # 查看日志
 docker logs -f qas-test

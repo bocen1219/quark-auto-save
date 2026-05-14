@@ -271,6 +271,9 @@ def get_task_suggestions():
         return jsonify({"success": False, "message": "未登录"})
     query = request.args.get("q", "").lower()
     deep = request.args.get("d", "").lower()
+    ps_src = request.args.get("ps_src", "")
+    ps_channels = request.args.get("ps_channels", "")
+    ps_plugins = request.args.get("ps_plugins", "")
     net_data = config_data.get("source", {}).get("net", {})
     cs_data = config_data.get("source", {}).get("cloudsaver", {})
     ps_data = config_data.get("source", {}).get("pansou", {})
@@ -307,7 +310,15 @@ def get_task_suggestions():
     def ps_search():
         if ps_data.get("server"):
             ps = PanSou(ps_data.get("server"))
-            return ps.search(query, deep == "1")
+            channels = ps_channels
+            plugins = ps_plugins
+            return ps.search(
+                query,
+                deep == "1",
+                channels=[c.strip() for c in channels.split(",") if c.strip()] if channels else None,
+                src=ps_src or None,
+                plugins=[p.strip() for p in plugins.split(",") if p.strip()] if plugins else None,
+            )
         return []
 
     try:
